@@ -1,7 +1,12 @@
 (function() {
     const DATA_ID_BORDER_CLASS = 'dm-data-id-border';
     const DATA_ID_INSET_CLASS = 'dm-data-id-inset';
-    const DM_COLOUR_CLASS = 'dm-colour-modifier';
+    const BORDER_HOVER_CLASS = 'dm-colour-modifier';
+
+    const HIGHLIGHT_COLOUR = '#9f0';
+    const HOVER_COLOUR = '#F90';
+
+    const insetPositions = [];
 
     function addScript(scriptPath) {
         return new Promise((resolve) => {
@@ -67,29 +72,45 @@
     function copyToClipboard(leafElement) {
         const $ = jQuery.noConflict();
         const leaf = $(leafElement);
-        const parents = [];
-        leaf.parents().each(function() {parents.push(this)});
-        const selector = buildSearch(leaf, parents);
+        let parents = [];
+        leaf.parents().each(function() {parents.unshift(this)});
+        parents = parents.filter(item => item && getQueryForElement(item));
+        console.log(`Building concise selector from hierarchy ${getQueryForElements(parents)}`);
+        const selector = buildSearch([leaf], parents);
+        if (!selector) {
+            console.warn('Not creating a selector since a unique one could not be built. Consider adding some unique dmDataId directives to the templates.');
+            return;
+        }
         console.log(`Copying selector "${selector}" to clipboard`);
         navigator.clipboard.writeText(selector);
     }
 
-    function buildSearch(leaf, parents) {
-        if (hasSingleItem([leaf])) {
-            return getQueryForElement(leaf);
+    function buildSearch(leaves, parents) {
+        if (countMatches(leaves) === 1) {
+            return getQueryForElements(leaves);
         }
         for (const parent of parents) {
-            const candidateChain = [parent, leaf];
-            if (hasSingleItem(candidateChain)) {
-                return candidateChain.map(getQueryForElement).join(' ');
+            const candidateChain = [parent].concat(leaves);
+            if (countMatches(candidateChain) === 1) {
+                return getQueryForElements(candidateChain);
             }
         }
-        return getQueryForElement(leaf);
+        if (parents.length == 0) {
+            console.warn(`Cannot build a unique selector for ${getQueryForElements(leaves)} using up to ${leaves.length} items. Found ${countMatches(leaves)} matches.`);
+            return null;
+        }
+        const lastParent = parents[parents.length-1];
+        return buildSearch([lastParent].concat(leaves), parents.slice(0, parents.length-2));
     }
 
-    function hasSingleItem(items) {
+    function countMatches(items) {
         const $ = jQuery.noConflict();
-        return $(items.map(getQueryForElement).join(' ')).length == 1;
+        const selector = getQueryForElements(items);
+        return $(selector).length;
+    }
+
+    function getQueryForElements(items) {
+        return items.map(item => getQueryForElement(item)).join(' ');
     }
 
     function getQueryForElement(item) {
@@ -100,57 +121,91 @@
         if ($(item).attr('dmDataId')) {
             return `[dmDataId="${(item).attr('dm-data-id')}"]`;
         }
-        return $(item).prop('nodeName');
+        const nodeName = $(item).prop('nodeName');
+        if (nodeName.indexOf('DM-') === 0) {
+            return nodeName;
+        }
+        return null;
     }
 
     function processDiv(element) {
         const $ = jQuery.noConflict();
+        const div = $(element);
         const pos = element.getBoundingClientRect();
         if (pos.width === 0 && pos.height === 0) {
             return;
         }
-        let hasDataId = true;
-        const div = $(element);
-        // div.addClass(HIGHLIGHT_CLASS_NAME);
-        let dataId = div.attr('dm-data-id');
-        if (!dataId) {
-            dataId = div.attr('dmDataId');
-        }
-        if (!dataId) {
-            hasDataId = false;
-            const nodeName = div.prop('nodeName');
-            dataId = nodeName.indexOf('DM') === 0 ? nodeName : null;
-        }
-
         // border rect
         const popoverBorder = window.document.createElement('div');
         $(popoverBorder)
             .addClass(DATA_ID_BORDER_CLASS)
-            .attr('style', `position: fixed; left:${pos.left}px; top:${pos.top}px; width:${pos.width}px; height: ${pos.height}px; z-index:9999`);
+            .attr('style', `position: fixed; left:${pos.left}px; top:${pos.top}px; width:${pos.width}px; height: ${pos.height}px;`);
 
 
         const popoverInset = window.document.createElement('div');
+        const [insetX, insetY] = getInsetPosition(pos);
         $(popoverInset)
             .addClass(DATA_ID_INSET_CLASS)
-            .attr('style', `position: fixed; left:${pos.left}px; top:${pos.top}px; z-index:9999`);
+            .attr('style', `position: fixed; left:${insetX}px; top:${insetY}px;`)
+            .hover(function() {
+                $(popoverBorder).addClass(BORDER_HOVER_CLASS);
+            }, function() {
+                $(popoverBorder).removeClass(BORDER_HOVER_CLASS);
+            });
         document.body.prepend(popoverInset);
         document.body.prepend(popoverBorder);
 
-        if (!hasDataId) {
-            $(popoverBorder).addClass(DM_COLOUR_CLASS);
-            $(popoverInset).addClass(DM_COLOUR_CLASS)
-        }
         // info square
         const link = window.document.createElement('p');
 
-        $(link).addClass('tippy-link').html(dataId).on("click", () => copyToClipboard(element));
+        $(link).addClass('tippy-link').html(getQueryForElement(div)).on("click", () => copyToClipboard(element));
         tippy(popoverInset, {
             content: link,
             appendTo: document.body,
             interactive: true,
             theme: 'maconomy',
-            allowHTML: true
+            allowHTML: true,
+            delay: 2000
         });
+    }
+
+    function getInsetPosition(desiredPosition) {
+        const gridSize = 12;
+        const originX = Math.round(desiredPosition.left / gridSize);
+        const originY = Math.round(desiredPosition.top / gridSize);
+        const maxSquareLength = 5;
+        for (let squareLength = 1; squareLength < maxSquareLength; squareLength++) {
+            for (let index=0; index<squareLength-1; index++) {
+                let [x, y] = getSquareOffsets(squareLength, index);
+                x += originX;
+                y += originY;
+                let occupied = true;
+                if (insetPositions[y] === undefined) {
+                    insetPositions[y] = [];
+                    occupied = false;
+                }
+                const row = insetPositions[y];
+                if (row[x] === undefined) {
+                    row[x] = true;
+                    occupied = false;
+                }
+                if (!occupied) {
+                    return [x * gridSize, y * gridSize];
+                }
+            }
+        }
+        console.warn('cannot find a unique position. Overlapping.');
+        return [originX, originY];
+    }
+
+    function getSquareOffsets(sideLength, index) {
+        if (index > (2*sideLength-1)) {
+            throw new Error('index out of bounds');
+        }
+        if (index < sideLength) {
+            return [index, sideLength-1];
+        }
+        return [sideLength-1, index - sideLength];
     }
 
     function annotateDivs(divs) {
@@ -160,6 +215,7 @@
             divs.each(function () {
                 processDiv(this);
             });
+            resolve();
         });
     }
 
@@ -169,29 +225,37 @@
             $('<style/>', {
                 text: `
     .${DATA_ID_BORDER_CLASS} {
-      border: #ff0 solid 2px;
+      border: ${HIGHLIGHT_COLOUR} solid 1px;
       pointer-events: none;
+      z-index: 5000
     }
     .${DATA_ID_INSET_CLASS} {
-      background: #ff0;
+      background: ${HIGHLIGHT_COLOUR};
       color: black;
       padding: 5px;
       width:10px;
       height:10px;
       enabled: true;
+      z-index: 6000;
     }
-    ${DM_COLOUR_CLASS} {
-      background: #f0f;
-      border-color: #f0f;
+    .${DATA_ID_INSET_CLASS}:hover {
+        background: ${HOVER_COLOUR};
+    }
+    .${BORDER_HOVER_CLASS} {
+      border: ${HOVER_COLOUR} solid 3px;
+      z-index: 8000;
     }
     .tippy-tooltip.maconomy-theme {
       background-color: yellow;
       color: black;
     }
     .tippy-link {
-      color: yellow;
-      text-decoration: underline;
+      color: ${HIGHLIGHT_COLOUR};
       cursor: pointer;
+    }
+    .tippy-link: hover {
+      color: ${HOVER_COLOUR};
+      text-decoration: underline;
     }
     `,
             }).appendTo('head');
